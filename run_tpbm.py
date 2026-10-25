@@ -1,4 +1,4 @@
-"""End-to-end Python equivalent of the MATLAB KS and KF spreadsheet trials."""
+"""End-to-end Python workflow for legacy workbooks and Garmin minute CSVs."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import pandas as pd
 from scipy.io import savemat
 
 from circadian_models import activity_to_light, estimate_available_phase_shift
-from data_io import load_minute_xlsx, save_timestamp_audit
+from data_io import load_minute_data, save_timestamp_audit
 from dlmo import compare_dlmo_extract, compare_dlmo_targets
 from kalman_smoothing import (
     compute_cost,
@@ -35,15 +35,13 @@ from particle_filter import (
     run_particle_filter,
 )
 
-_SUBJECTS = ("3_3", "3_4", "4_3", "4_5")
-
-
 @dataclass(frozen=True, slots=True)
 class PipelineConfig:
     subject: str
     input_xlsx: Path
     output_root: Path = Path("tPBM Results")
     option: int = 3
+    signal_label: str | None = None
     ks_seed: int = 12345
     ks_iterations: int = 150
     ks_population: int = 100
@@ -67,6 +65,8 @@ class PipelineConfig:
 
     @property
     def signal_name(self) -> str:
+        if self.signal_label is not None:
+            return self.signal_label
         return "Act" if self.option == 2 else "BPM"
 
 def _fill_light(activity: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -473,7 +473,7 @@ def _save_results_visualization(
 
 
 def run_pipeline(config: PipelineConfig) -> dict[str, object]:
-    """Run XLSX ingestion, Kalman phase estimation, particle filtering, and DLMO tracking."""
+    """Run input loading, Kalman phase estimation, particle filtering, and DLMO tracking."""
     if config.option not in (2, 3):
         raise ValueError("option must be 2 (activity) or 3 (BPM)")
     if config.phase_estimator not in ("KS", "KF"):
@@ -481,7 +481,21 @@ def run_pipeline(config: PipelineConfig) -> dict[str, object]:
     if config.pf.n_particles < 2:
         raise ValueError("particle count must be at least two")
     source = config.input_xlsx.resolve()
-    data = load_minute_xlsx(source)
+    if source.suffix.lower() not in {".xlsx", ".csv"}:
+        raise ValueError("input must be an .xlsx workbook or converted Garmin .csv")
+    data = load_minute_data(source)
+    if source.suffix.lower() == ".csv" and config.signal_label is not None:
+        expected_signal = "ZeroCrossingCount" if config.option == 2 else "HeartRate"
+        if config.signal_label != expected_signal:
+            raise ValueError(
+                f"signal {config.signal_label!r} does not match the selected "
+                f"Garmin CSV signal {expected_signal!r}"
+            )
+    signal_name = config.signal_label or (
+        ("ZeroCrossingCount" if config.option == 2 else "HeartRate")
+        if source.suffix.lower() == ".csv"
+        else config.signal_name
+    )
     frame = data.columns
     activity = frame.iloc[:, 0].to_numpy(dtype=np.float64)
     signal_index = config.option - 2
@@ -491,7 +505,7 @@ def run_pipeline(config: PipelineConfig) -> dict[str, object]:
     raw_light, light, light_gap_mask = _fill_light(activity)
 
     output_dir = config.output_root / (
-        f"A{config.subject}_{config.signal_name}_{config.phase_estimator}_phi_Q5_R015_seed{config.pf.seed}_"
+        f"A{config.subject}_{signal_name}_{config.phase_estimator}_phi_Q5_R015_seed{config.pf.seed}_"
         f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
     )
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -499,7 +513,7 @@ def run_pipeline(config: PipelineConfig) -> dict[str, object]:
     for child in ("Input", estimator_name, "PF", "CBT"):
         (output_dir / child).mkdir()
 
-    original_times = pd.DatetimeIndex(pd.to_datetime(pd.read_excel(source).iloc[:, 0]))
+    original_times = data.source_timestamps
     aligned_times = original_times.round("min")
     save_timestamp_audit(
         output_dir / "Input" / "TimestampAudit.csv",
@@ -610,9 +624,11 @@ def run_pipeline(config: PipelineConfig) -> dict[str, object]:
     config_summary = asdict(config)
     config_summary.pop("ks_deviation_factor", None)
     config_summary.pop("kf_deviation_factor", None)
+    config_summary["signal_label"] = signal_name
     summary = {
         "subject": config.subject,
-        "signal": config.signal_name,
+        "signal": signal_name,
+        "input_file": str(source),
         "input_xlsx": str(source),
         "start_day": data.start_day.isoformat(),
         "start_midnight": data.start_midnight.isoformat(),
@@ -638,6 +654,7 @@ def run_pipeline(config: PipelineConfig) -> dict[str, object]:
         "visualization": str(visualization_path.resolve()),
         "config": {
             **config_summary,
+            "input_file": str(source),
             "input_xlsx": str(source),
             "output_root": str(config.output_root),
             "pf": asdict(config.pf),
@@ -660,9 +677,17 @@ def run_pipeline(config: PipelineConfig) -> dict[str, object]:
 
 def _main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input_xlsx", type=Path)
-    parser.add_argument("--subject", choices=_SUBJECTS, required=True)
-    parser.add_argument("--signal", choices=("Act", "BPM"), default="BPM")
+    parser.add_argument(
+        "input_xlsx",
+        type=Path,
+        help="legacy XLSX workbook or converted Garmin Minute-by-minute.csv",
+    )
+    parser.add_argument("--subject", required=True)
+    parser.add_argument(
+        "--signal",
+        choices=("Act", "BPM", "ZeroCrossingCount", "HeartRate"),
+        default=None,
+    )
     parser.add_argument("--output-root", type=Path, default=Path("tPBM Results"))
     parser.add_argument("--ks-seed", type=int, default=12345)
     parser.add_argument("--ks-iterations", type=int, default=150)
@@ -691,11 +716,15 @@ def _main() -> None:
     parser.add_argument("--start-after-hours", type=float, default=72.0)
     parser.add_argument("--store-history", action="store_true")
     args = parser.parse_args()
+    signal = args.signal or (
+        "HeartRate" if args.input_xlsx.suffix.lower() == ".csv" else "BPM"
+    )
     config = PipelineConfig(
         subject=args.subject,
         input_xlsx=args.input_xlsx,
         output_root=args.output_root,
-        option=2 if args.signal == "Act" else 3,
+        option=2 if signal in ("Act", "ZeroCrossingCount") else 3,
+        signal_label=signal,
         ks_seed=args.ks_seed,
         ks_iterations=args.ks_iterations,
         ks_population=args.ks_population,

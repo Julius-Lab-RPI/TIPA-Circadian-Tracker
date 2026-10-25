@@ -17,12 +17,13 @@ FloatArray = NDArray[np.float64]
 
 @dataclass(slots=True)
 class MinuteData:
-    """One-minute-grid data and audit details from a source spreadsheet."""
+    """One-minute-grid data and audit details from a source file."""
 
     timestamps: pd.DatetimeIndex
     time_hours: FloatArray
     minute_data_days: FloatArray
     columns: pd.DataFrame
+    source_timestamps: pd.DatetimeIndex
     source_rows_kept: NDArray[np.int64]
     inserted_minutes: NDArray[np.bool_]
     duplicate_rows: NDArray[np.int64]
@@ -60,21 +61,61 @@ def _regularize_minute_frame(
     return full_index, regular, kept_rows, inserted, duplicate_rows
 
 
-def load_minute_xlsx(path: str | Path) -> MinuteData:
-    """Load the workflow spreadsheet and enforce its strict one-minute grid."""
+def load_minute_data(path: str | Path) -> MinuteData:
+    """Load a legacy workbook or converted Garmin CSV onto a one-minute grid."""
     source = Path(path)
     if not source.is_file():
-        raise FileNotFoundError(f"spreadsheet not found: {source}")
-    frame = pd.read_excel(source)
-    if frame.shape[1] < 3:
-        raise ValueError("spreadsheet needs timestamp, activity, and signal columns")
-    data = frame.iloc[:, 1:].apply(pd.to_numeric, errors="coerce")
+        raise FileNotFoundError(f"input file not found: {source}")
+    if source.suffix.lower() == ".csv":
+        frame = pd.read_csv(source, encoding="utf-8-sig")
+        columns_by_name = {str(column).strip().casefold(): column for column in frame.columns}
+        required = ("time", "zerocrossingcount", "heartrate")
+        missing = [name for name in required if name not in columns_by_name]
+        if missing:
+            raise ValueError(
+                "minute-by-minute CSV must contain columns: "
+                "time, ZeroCrossingCount, HeartRate"
+            )
+        timestamp_column, activity_column, signal_column = (
+            columns_by_name[name] for name in required
+        )
+        timestamps = frame[timestamp_column]
+        data = frame[[activity_column, signal_column]].copy()
+    elif source.suffix.lower() == ".xlsx":
+        frame = pd.read_excel(source)
+        if frame.shape[1] < 3:
+            raise ValueError("spreadsheet needs timestamp, activity, and signal columns")
+        timestamps = frame.iloc[:, 0]
+        data = frame.iloc[:, 1:].copy()
+    else:
+        raise ValueError("input file must be an .xlsx, .xls, or converted .csv file")
+
+    source_timestamps = pd.DatetimeIndex(pd.to_datetime(timestamps, errors="coerce"))
+    if source_timestamps.isna().any():
+        raise ValueError("source data contains invalid timestamps")
+    data = data.apply(pd.to_numeric, errors="coerce")
     index, regular, kept, inserted, duplicates = _regularize_minute_frame(
-        frame.iloc[:, 0], data
+        source_timestamps, data
     )
     t = np.asarray((index - index[0].normalize()) / pd.Timedelta(hours=1), dtype=np.float64)
     minute_data = np.column_stack((t / 24.0, regular.to_numpy(dtype=np.float64)))
-    return MinuteData(index, t, minute_data, regular, kept, inserted, duplicates)
+    return MinuteData(
+        index,
+        t,
+        minute_data,
+        regular,
+        source_timestamps,
+        kept,
+        inserted,
+        duplicates,
+    )
+
+
+def load_minute_xlsx(path: str | Path) -> MinuteData:
+    """Load an Excel workbook using the legacy loader API."""
+    if Path(path).suffix.lower() != ".xlsx":
+        raise ValueError("load_minute_xlsx requires an .xlsx workbook")
+    return load_minute_data(path)
 
 
 def load_xlsx_data(

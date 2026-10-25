@@ -70,6 +70,34 @@ class TranslatedModuleTests(unittest.TestCase):
         self.assertEqual(launcher.elapsed.value, "Elapsed: 00:00:02")
         self.assertIsNone(launcher.started_at)
 
+    def test_gui_detects_garmin_csv_and_selects_heart_rate(self) -> None:
+        class FakeVariable:
+            def __init__(self) -> None:
+                self.value = ""
+
+            def set(self, value: str) -> None:
+                self.value = value
+
+        launcher = TpbmLauncher.__new__(TpbmLauncher)
+        launcher.input_path = FakeVariable()
+        launcher.subject = FakeVariable()
+        launcher.signal = FakeVariable()
+        launcher.status = FakeVariable()
+        launcher.signal_box = SimpleNamespace(
+            configure=lambda **kwargs: setattr(launcher, "signal_values", kwargs["values"])
+        )
+        path = Path("C:/experiment/subject-13/Minute-by-minute.csv")
+
+        launcher._configure_selected_input(path)
+
+        self.assertEqual(launcher.input_path.value, str(path))
+        self.assertEqual(launcher.subject.value, "subject-13")
+        self.assertEqual(launcher.signal.value, "HeartRate")
+        self.assertEqual(
+            launcher.signal_values,
+            ("HeartRate", "ZeroCrossingCount"),
+        )
+
     def test_state_space_and_rts_smoother_shapes(self) -> None:
         a, b, c, d = create_kalman_state_space(1, 3, 1 / 60)
         self.assertEqual(a.shape, (3, 3))

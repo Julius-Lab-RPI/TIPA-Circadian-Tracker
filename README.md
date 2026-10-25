@@ -7,9 +7,11 @@ candidate detection and tracking, and plotting/exporting results.
 
 ## Package contents
 
-- `run_tpbm.py`: complete XLSX-to-DLMO workflow; command-line entry point.
+- `run_tpbm.py`: complete XLSX/CSV-to-DLMO workflow; command-line entry point.
 - `run_tpbm_gui.py`: Windows file-picker interface for selecting input,
   subject, signal, phase estimator, and output folder.
+- `convert_garmin_data.py`: convert Labfront Garmin heart-rate and actigraphy
+  exports into one-minute subject CSV files.
 - `plot_tpbm_results.py`: regenerate the three-panel SVG visualization from a
   saved run folder.
 - `particle_filter.py`: particle filter; can also be run independently from a
@@ -50,9 +52,12 @@ From VS Code's `cmd.exe` terminal:
 
 In the window:
 
-1. Click **Browse...** next to Input workbook and choose an `.xlsx` file.
-2. Select the subject (`3_3`, `3_4`, `4_3`, or `4_5`).
-3. Select the signal (`BPM` or `Act`).
+1. Click **Browse...** and choose either an `.xlsx` workbook or a converted
+   Garmin `Minute-by-minute.csv`.
+2. Confirm or edit the subject name (it is inferred from the selected file).
+3. Confirm the signal; the GUI defaults to `BPM` for workbooks and
+   `HeartRate` for Garmin CSV files. Garmin `ZeroCrossingCount` can also be
+   selected as the phase-estimation signal.
 4. Select the phase estimator (`KF` or `KS`).
 5. Optionally choose a results folder, then click **Run analysis**.
 6. When it finishes, choose **Open latest results folder** to inspect outputs.
@@ -60,6 +65,23 @@ In the window:
 The GUI defaults to the forward KF estimator and saves into `tPBM Results`
 beside the Python scripts. It remains responsive while analysis runs. Errors
 are shown in a dialog.
+
+## Convert Garmin experiment exports
+
+Each subject folder should contain `garmin-connect-daily-heart-rate` and
+`garmin-device-actigraphy` subfolders with the Labfront CSV exports. Run:
+
+```cmd
+"E:\miniforge3\envs\tpbm\python.exe" "E:\tPBM Python\convert_garmin_data.py" "C:\path\to\experiment-data"
+```
+
+The converter writes `Minute-by-minute.csv` into each subject folder with
+`time`, `ZeroCrossingCount`, and `HeartRate` columns. It selects heart-rate
+readings recorded exactly at the minute boundary, rounds actigraphy timestamps
+to the nearest minute, and leaves unmatched readings blank. The command reports
+missing minute values and dates where only one data type has a source file.
+After conversion, the analysis GUI can open that subject's
+`Minute-by-minute.csv` directly; no temporary Excel conversion is needed.
 
 ## Use case 2: Run the complete analysis from the command line
 
@@ -75,12 +97,13 @@ The same command using the KS/RTS smoother:
 "E:\miniforge3\envs\tpbm\python.exe" "E:\tPBM Python\run_tpbm.py" "C:\path\to\4_5_minute-by-minute-data.xlsx" --subject 4_5 --signal BPM --phase-estimator KS
 ```
 
-Replace the workbook path with the path on your computer. Paths containing
-spaces must be enclosed in quotes. The required `--subject` value is used for
-run identification; the workbook itself is selected by the positional
-`input_xlsx` path. `--signal Act` uses the Act column; `--signal BPM` uses BPM.
-Activity is also mapped to light input for the particle filter, regardless of
-which signal is selected for phase estimation.
+Replace the input path with a workbook or converted Garmin CSV on your
+computer. Paths containing spaces must be enclosed in quotes. The required
+`--subject` value is used for run identification. If omitted, `--signal`
+defaults to BPM for XLSX and HeartRate for Garmin CSV. Use `--signal Act` or
+`--signal BPM` for legacy workbooks, and `--signal HeartRate` or
+`--signal ZeroCrossingCount` for Garmin CSV files. Activity counts are mapped
+to light input for the particle filter in either format.
 
 See all command-line options:
 
@@ -93,7 +116,7 @@ Useful options:
 | Option | Purpose | Default |
 |---|---|---|
 | `--phase-estimator KS` or `KF` | Select KS/RTS or forward-KF phase estimation | `KS` |
-| `--signal Act` or `BPM` | Select which spreadsheet signal is analyzed | `BPM` |
+| `--signal Act`, `BPM`, `ZeroCrossingCount`, or `HeartRate` | Select which input signal is analyzed | Auto: `BPM` for XLSX; `HeartRate` for CSV |
 | `--output-root "folder"` | Choose where timestamped run folders are created | `tPBM Results` |
 | `--ks-iterations`, `--ks-population`, `--ks-offspring` | Set KS optimizer size | `150`, `100`, `50` |
 | `--kf-iterations`, `--kf-population`, `--kf-offspring` | Set KF optimizer size | `150`, `100`, `50` |
@@ -114,19 +137,21 @@ production results or estimating the default optimizer's runtime. The hidden
 legacy `--prefilter KF` alias is still accepted, but new commands should use
 `--phase-estimator KF`.
 
-### Input workbook format
+### Input data formats
 
-The XLSX loader expects at least three columns, in this order:
+Legacy XLSX workbooks need at least three columns, in this order:
 
 1. Timestamp
 2. Activity (also used to estimate light input)
 3. BPM
 
-Column headers are not used to choose these fields; their order matters. The
-loader rounds timestamps to the nearest minute, retains the first row for
-duplicate minute labels, and inserts missing minutes on a regular one-minute
-grid. Non-numeric signal cells become missing values. The input workbook is
-read-only from the pipeline's perspective; it is not modified.
+Column headers are not used to choose these fields; their order matters.
+Converted Garmin CSV files need the columns `time`, `ZeroCrossingCount`, and
+`HeartRate`. The loader rounds timestamps to the nearest minute, retains the
+first row for duplicate minute labels, and inserts missing minutes on a
+regular one-minute grid. Non-numeric signal cells become missing values.
+Input files are read-only from the pipeline's perspective; they are not
+modified.
 
 ### Full-pipeline outputs
 

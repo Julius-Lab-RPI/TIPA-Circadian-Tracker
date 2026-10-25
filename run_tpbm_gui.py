@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import threading
 import time
 import tkinter as tk
@@ -38,7 +39,7 @@ class TpbmLauncher:
         self.subject = tk.StringVar(value="4_5")
         self.signal = tk.StringVar(value="BPM")
         self.phase_estimator = tk.StringVar(value="KF")
-        self.status = tk.StringVar(value="Choose the spreadsheet to begin.")
+        self.status = tk.StringVar(value="Choose an XLSX workbook or Garmin CSV to begin.")
         self.elapsed = tk.StringVar(value="")
 
         self._build_form()
@@ -57,13 +58,13 @@ class TpbmLauncher:
         ttk.Label(
             frame,
             text=(
-                "The workbook is read only. Select its subject and signal below. "
-                "Expected columns: timestamp, activity, Act, BPM."
+                "Choose a legacy XLSX workbook or a converted "
+                "Minute-by-minute.csv. Subject and signal are detected when possible."
             ),
             wraplength=700,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 16))
 
-        ttk.Label(frame, text="Input workbook").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="Input data").grid(row=2, column=0, sticky="w", pady=5)
         ttk.Entry(frame, textvariable=self.input_path).grid(
             row=2, column=1, sticky="ew", padx=8, pady=5
         )
@@ -73,11 +74,9 @@ class TpbmLauncher:
         self.browse_file_button.grid(row=2, column=2, sticky="ew", pady=5)
 
         ttk.Label(frame, text="Subject").grid(row=3, column=0, sticky="w", pady=5)
-        self.subject_box = ttk.Combobox(
+        self.subject_box = ttk.Entry(
             frame,
             textvariable=self.subject,
-            values=("3_3", "3_4", "4_3", "4_5"),
-            state="readonly",
             width=14,
         )
         self.subject_box.grid(row=3, column=1, sticky="w", padx=8, pady=5)
@@ -147,12 +146,31 @@ class TpbmLauncher:
         selected = filedialog.askopenfilename(
             title="Select the tPBM spreadsheet",
             filetypes=(
+                ("Supported data", "*.xlsx *.csv"),
                 ("Excel workbooks", "*.xlsx"),
+                ("Converted Garmin data", "*.csv"),
                 ("All files", "*.*"),
             ),
         )
         if selected:
-            self.input_path.set(selected)
+            self._configure_selected_input(Path(selected))
+
+    def _configure_selected_input(self, path: Path) -> None:
+        self.input_path.set(str(path))
+        if path.suffix.lower() == ".csv":
+            self.subject.set(path.parent.name)
+            self.signal_box.configure(values=("HeartRate", "ZeroCrossingCount"))
+            self.signal.set("HeartRate")
+            self.status.set("Garmin CSV selected. HeartRate will be analyzed by default.")
+            return
+
+        self.signal_box.configure(values=("BPM", "Act"))
+        self.signal.set("BPM")
+        subject_match = re.match(r"(.+)_minute-by-minute-data$", path.stem)
+        self.subject.set(
+            subject_match.group(1) if subject_match else path.parent.name
+        )
+        self.status.set("Workbook selected. BPM will be analyzed by default.")
 
     def _browse_output(self) -> None:
         selected = filedialog.askdirectory(
@@ -168,16 +186,24 @@ class TpbmLauncher:
         self.run_button.configure(state=state)
         self.browse_file_button.configure(state=state)
         self.browse_output_button.configure(state=state)
-        self.subject_box.configure(state="disabled" if running else "readonly")
+        self.subject_box.configure(state="disabled" if running else "normal")
         self.signal_box.configure(state="disabled" if running else "readonly")
         self.estimator_box.configure(state="disabled" if running else "readonly")
 
     def _start_run(self) -> None:
         source = Path(self.input_path.get().strip()).expanduser()
-        if not source.is_file():
+        if not source.is_file() or source.suffix.lower() not in {".xlsx", ".csv"}:
             messagebox.showerror(
-                "Select a workbook",
-                "Browse to an existing .xlsx workbook before running.",
+                "Select supported input data",
+                "Browse to an existing .xlsx workbook or converted Garmin CSV.",
+                parent=self.root,
+            )
+            return
+        subject = self.subject.get().strip()
+        if not subject or re.search(r'[<>:"/\\|?*\x00-\x1f]', subject):
+            messagebox.showerror(
+                "Check subject name",
+                "Enter a subject name without filename-invalid characters.",
                 parent=self.root,
             )
             return
@@ -193,10 +219,11 @@ class TpbmLauncher:
             return
 
         config = PipelineConfig(
-            subject=self.subject.get(),
+            subject=subject,
             input_xlsx=source,
             output_root=output,
-            option=2 if self.signal.get() == "Act" else 3,
+            option=2 if self.signal.get() in ("Act", "ZeroCrossingCount") else 3,
+            signal_label=self.signal.get(),
             phase_estimator=self.phase_estimator.get(),
         )
         self._set_running(True)
