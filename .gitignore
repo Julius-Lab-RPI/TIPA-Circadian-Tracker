@@ -1,5 +1,7 @@
 # Generated analysis results
 /tPBM Results/
+/build/
+/dist/
 
 # Python bytecode
 __pycache__/
@@ -8,3 +10,7 @@ __pycache__/
 # Local virtual environments
 .venv/
 venv/
+.venv-build/
+.conda-build/
+/TpbmAnalysis.spec
+/TpbmAnalysisDebug.spec

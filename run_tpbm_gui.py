@@ -5,13 +5,16 @@ from __future__ import annotations
 import os
 import queue
 import re
+import sys
 import threading
 import time
+from collections.abc import Callable
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
+from convert_garmin_data import convert_subject
 from run_tpbm import PipelineConfig, run_pipeline
 
 
@@ -22,24 +25,96 @@ def _format_elapsed(seconds: float) -> str:
     return f"Elapsed: {hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
+def _default_output_root() -> Path:
+    if getattr(sys, "frozen", False):
+        documents = Path.home() / "Documents"
+        return (documents if documents.is_dir() else Path.home()) / "tPBM Results"
+    return Path(__file__).resolve().parent / "tPBM Results"
+
+
+def _subject_directories(dataset_root: Path) -> list[Path]:
+    if not dataset_root.is_dir():
+        raise NotADirectoryError(f"data folder does not exist: {dataset_root}")
+    if any(
+        (dataset_root / name).is_dir()
+        for name in (
+            "garmin-connect-daily-heart-rate",
+            "garmin-device-actigraphy",
+        )
+    ):
+        return [dataset_root]
+    return sorted(path for path in dataset_root.iterdir() if path.is_dir())
+
+
+def _run_dataset(
+    dataset_root: Path,
+    output_root: Path,
+    signal: str,
+    phase_estimator: str,
+    progress: Callable[[str], None],
+) -> dict[str, Any]:
+    subjects = _subject_directories(dataset_root)
+    if not subjects:
+        raise ValueError(
+            "The selected folder contains no subject folders. Select a dataset "
+            "folder containing participant folders or one participant folder."
+        )
+
+    completed: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    failed: list[str] = []
+    for index, subject_directory in enumerate(subjects, start=1):
+        subject = subject_directory.name
+        progress(f"Converting and analyzing {subject} ({index}/{len(subjects)})...")
+        try:
+            report = convert_subject(subject_directory)
+            if report.output_path is None:
+                skipped.append(subject)
+                continue
+            option = 2 if signal == "ZeroCrossingCount" else 3
+            result = run_pipeline(
+                PipelineConfig(
+                    subject=subject,
+                    input_xlsx=report.output_path,
+                    output_root=output_root,
+                    option=option,
+                    signal_label=signal,
+                    phase_estimator=phase_estimator,
+                )
+            )
+            completed.append(result["summary"])
+        except Exception as error:
+            failed.append(f"{subject}: {type(error).__name__}: {error}")
+
+    if not completed and failed:
+        raise RuntimeError("No subject completed analysis.\n" + "\n".join(failed))
+    if not completed:
+        raise ValueError("No usable Garmin data was found in the selected folder.")
+    return {
+        "completed": completed,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
 class TpbmLauncher:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("tPBM Analysis")
-        self.root.geometry("760x390")
-        self.root.minsize(680, 360)
+        self.root.geometry("900x430")
+        self.root.minsize(800, 400)
         self.messages: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.started_at: float | None = None
         self.result_directory: Path | None = None
 
         self.input_path = tk.StringVar()
-        self.output_root = tk.StringVar(
-            value=str(Path(__file__).resolve().parent / "tPBM Results")
-        )
+        self.output_root = tk.StringVar(value=str(_default_output_root()))
         self.subject = tk.StringVar(value="4_5")
         self.signal = tk.StringVar(value="BPM")
         self.phase_estimator = tk.StringVar(value="KF")
-        self.status = tk.StringVar(value="Choose an XLSX workbook or Garmin CSV to begin.")
+        self.status = tk.StringVar(
+            value="Choose a workbook, Garmin CSV, or Garmin data folder to begin."
+        )
         self.elapsed = tk.StringVar(value="")
 
         self._build_form()
@@ -54,15 +129,15 @@ class TpbmLauncher:
             frame,
             text="Run the tPBM circadian analysis",
             font=("Segoe UI", 15, "bold"),
-        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 12))
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 12))
         ttk.Label(
             frame,
             text=(
-                "Choose a legacy XLSX workbook or a converted "
-                "Minute-by-minute.csv. Subject and signal are detected when possible."
+                "Choose an XLSX/CSV file, a participant folder, or a dataset "
+                "folder containing participant folders with Garmin exports."
             ),
             wraplength=700,
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 16))
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 16))
 
         ttk.Label(frame, text="Input data").grid(row=2, column=0, sticky="w", pady=5)
         ttk.Entry(frame, textvariable=self.input_path).grid(
@@ -72,6 +147,10 @@ class TpbmLauncher:
             frame, text="Browse...", command=self._browse_input
         )
         self.browse_file_button.grid(row=2, column=2, sticky="ew", pady=5)
+        self.browse_folder_button = ttk.Button(
+            frame, text="Data folder...", command=self._browse_dataset
+        )
+        self.browse_folder_button.grid(row=2, column=3, sticky="ew", padx=(8, 0), pady=5)
 
         ttk.Label(frame, text="Subject").grid(row=3, column=0, sticky="w", pady=5)
         self.subject_box = ttk.Entry(
@@ -107,7 +186,7 @@ class TpbmLauncher:
         ttk.Label(
             frame,
             text="KF = forward filter; KS = RTS smoother.",
-        ).grid(row=5, column=2, sticky="w", padx=8)
+        ).grid(row=5, column=2, columnspan=2, sticky="w", padx=8)
 
         ttk.Label(frame, text="Results folder").grid(
             row=6, column=0, sticky="w", pady=5
@@ -118,10 +197,12 @@ class TpbmLauncher:
         self.browse_output_button = ttk.Button(
             frame, text="Browse...", command=self._browse_output
         )
-        self.browse_output_button.grid(row=6, column=2, sticky="ew", pady=5)
+        self.browse_output_button.grid(
+            row=6, column=2, columnspan=2, sticky="ew", padx=(8, 0), pady=5
+        )
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(18, 8))
+        buttons.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(18, 8))
         buttons.columnconfigure(0, weight=1)
         self.run_button = ttk.Button(
             buttons, text="Run analysis", command=self._start_run
@@ -136,10 +217,10 @@ class TpbmLauncher:
         self.open_results_button.grid(row=0, column=1, sticky="e")
 
         ttk.Label(frame, textvariable=self.status).grid(
-            row=8, column=0, columnspan=3, sticky="w", pady=(8, 2)
+            row=8, column=0, columnspan=4, sticky="w", pady=(8, 2)
         )
         ttk.Label(frame, textvariable=self.elapsed).grid(
-            row=9, column=0, columnspan=3, sticky="w"
+            row=9, column=0, columnspan=4, sticky="w"
         )
 
     def _browse_input(self) -> None:
@@ -154,6 +235,26 @@ class TpbmLauncher:
         )
         if selected:
             self._configure_selected_input(Path(selected))
+
+    def _browse_dataset(self) -> None:
+        current_path = self.input_path.get().strip()
+        current = Path(current_path).expanduser() if current_path else Path.home()
+        initial_directory = current if current.is_dir() else current.parent
+        selected = filedialog.askdirectory(
+            title="Select a Garmin dataset or participant folder",
+            initialdir=str(initial_directory),
+        )
+        if selected:
+            self.input_path.set(selected)
+            self.signal_box.configure(
+                values=("HeartRate", "ZeroCrossingCount")
+            )
+            self.signal.set("HeartRate")
+            self.subject.set("Folder mode")
+            self.status.set(
+                "Folder selected. The app will create Minute-by-minute.csv "
+                "and analyze each participant with usable data."
+            )
 
     def _configure_selected_input(self, path: Path) -> None:
         self.input_path.set(str(path))
@@ -185,6 +286,7 @@ class TpbmLauncher:
         state = "disabled" if running else "normal"
         self.run_button.configure(state=state)
         self.browse_file_button.configure(state=state)
+        self.browse_folder_button.configure(state=state)
         self.browse_output_button.configure(state=state)
         self.subject_box.configure(state="disabled" if running else "normal")
         self.signal_box.configure(state="disabled" if running else "readonly")
@@ -192,15 +294,20 @@ class TpbmLauncher:
 
     def _start_run(self) -> None:
         source = Path(self.input_path.get().strip()).expanduser()
-        if not source.is_file() or source.suffix.lower() not in {".xlsx", ".csv"}:
+        is_dataset = source.is_dir()
+        if not is_dataset and (
+            not source.is_file() or source.suffix.lower() not in {".xlsx", ".csv"}
+        ):
             messagebox.showerror(
                 "Select supported input data",
-                "Browse to an existing .xlsx workbook or converted Garmin CSV.",
+                "Choose an existing .xlsx/CSV file or a Garmin data folder.",
                 parent=self.root,
             )
             return
         subject = self.subject.get().strip()
-        if not subject or re.search(r'[<>:"/\\|?*\x00-\x1f]', subject):
+        if not is_dataset and (
+            not subject or re.search(r'[<>:"/\\|?*\x00-\x1f]', subject)
+        ):
             messagebox.showerror(
                 "Check subject name",
                 "Enter a subject name without filename-invalid characters.",
@@ -230,17 +337,43 @@ class TpbmLauncher:
         self.started_at = time.perf_counter()
         self.status.set("Running analysis. This window will remain responsive.")
         self.elapsed.set(_format_elapsed(0))
-        worker = threading.Thread(
-            target=self._run_pipeline_worker,
-            args=(config,),
-            daemon=True,
-        )
+        if is_dataset:
+            worker = threading.Thread(
+                target=self._run_dataset_worker,
+                args=(source, output, self.signal.get(), self.phase_estimator.get()),
+                daemon=True,
+            )
+        else:
+            worker = threading.Thread(
+                target=self._run_pipeline_worker,
+                args=(config,),
+                daemon=True,
+            )
         worker.start()
 
     def _run_pipeline_worker(self, config: PipelineConfig) -> None:
         try:
             result = run_pipeline(config)
             self.messages.put(("success", result["summary"]))
+        except Exception as error:
+            self.messages.put(("error", error))
+
+    def _run_dataset_worker(
+        self,
+        dataset_root: Path,
+        output_root: Path,
+        signal: str,
+        phase_estimator: str,
+    ) -> None:
+        try:
+            result = _run_dataset(
+                dataset_root,
+                output_root,
+                signal,
+                phase_estimator,
+                lambda message: self.messages.put(("progress", message)),
+            )
+            self.messages.put(("dataset_success", result))
         except Exception as error:
             self.messages.put(("error", error))
 
@@ -251,6 +384,11 @@ class TpbmLauncher:
         try:
             kind, payload = self.messages.get_nowait()
         except queue.Empty:
+            self.root.after(150, self._poll_worker)
+            return
+
+        if kind == "progress":
+            self.status.set(str(payload))
             self.root.after(150, self._poll_worker)
             return
 
@@ -268,6 +406,34 @@ class TpbmLauncher:
                 f"Results were saved to:\n{self.result_directory}",
                 parent=self.root,
             )
+        elif kind == "dataset_success":
+            completed = payload["completed"]
+            self.result_directory = Path(completed[-1]["output_dir"])
+            self.open_results_button.configure(state="normal")
+            details = [
+                f"Completed analyses: {len(completed)}",
+                f"Skipped empty subjects: {len(payload['skipped'])}",
+                f"Failed subjects: {len(payload['failed'])}",
+                f"Results folder: {self.result_directory.parent}",
+            ]
+            if payload["failed"]:
+                details.extend(["", *payload["failed"]])
+            self.status.set(
+                f"Folder processing finished: {len(completed)} analyzed, "
+                f"{len(payload['skipped'])} skipped, {len(payload['failed'])} failed."
+            )
+            if payload["failed"]:
+                messagebox.showwarning(
+                    "Folder processing finished with errors",
+                    "\n".join(details),
+                    parent=self.root,
+                )
+            else:
+                messagebox.showinfo(
+                    "Folder processing complete",
+                    "\n".join(details),
+                    parent=self.root,
+                )
         else:
             self.status.set("Analysis failed. See the error message for details.")
             messagebox.showerror(

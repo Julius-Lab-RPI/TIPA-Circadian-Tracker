@@ -42,6 +42,26 @@ Use your own Python executable path if it differs. Conda activation is
 optional: calling the environment's `python.exe` directly avoids shell
 activation-policy issues.
 
+## Build and distribute the Windows app
+
+Build on a Windows computer with Python installed. From PowerShell in the
+project folder, install the build dependencies and create the app package:
+
+```powershell
+& "E:\miniforge3\Scripts\conda.exe" create -y -n tpbm-build python=3.12 pip
+& "E:\miniforge3\envs\tpbm-build\python.exe" -m pip install -r requirements-build.txt
+& ".\build_windows.cmd" "E:\miniforge3\envs\tpbm-build\python.exe"
+```
+
+The executable and shareable ZIP are created in `dist`. Send
+`TpbmAnalysis-Windows.zip` to Windows users; extract the ZIP and run
+`TpbmAnalysis.exe` from the extracted `TpbmAnalysis` folder. Keep the other
+bundled files beside the executable. Analysis results default to a
+`tPBM Results` folder under the user's Documents folder (or their home folder
+if Documents is unavailable). Build from a clean Python/Conda environment to
+avoid bundling unrelated installed packages. The build is an unsigned Windows application,
+not an installer; Windows SmartScreen may show a warning when it is first run.
+
 ## Use case 1: Run the complete analysis with the file-picker UI
 
 From VS Code's `cmd.exe` terminal:
@@ -52,8 +72,8 @@ From VS Code's `cmd.exe` terminal:
 
 In the window:
 
-1. Click **Browse...** and choose either an `.xlsx` workbook or a converted
-   Garmin `Minute-by-minute.csv`.
+1. Click **Browse...** to choose an `.xlsx` workbook or converted Garmin CSV,
+   or click **Data folder...** to choose a Garmin participant or dataset folder.
 2. Confirm or edit the subject name (it is inferred from the selected file).
 3. Confirm the signal; the GUI defaults to `BPM` for workbooks and
    `HeartRate` for Garmin CSV files. Garmin `ZeroCrossingCount` can also be
@@ -65,6 +85,16 @@ In the window:
 The GUI defaults to the forward KF estimator and saves into `tPBM Results`
 beside the Python scripts. It remains responsive while analysis runs. Errors
 are shown in a dialog.
+
+When a data folder is selected, the GUI converts and analyzes each participant
+folder in sequence. You can select either one participant folder or the parent
+dataset folder containing participant subfolders. Each participant should
+contain `garmin-connect-daily-heart-rate` and
+`garmin-device-actigraphy` folders. The converter creates
+`Minute-by-minute.csv` inside each participant folder; the GUI then runs the
+selected phase estimator and particle-filter/DLMO analysis for that participant.
+Progress is shown in the status line, and completion reports any skipped or
+failed participant folders.
 
 ## Convert Garmin experiment exports
 
