@@ -1,7 +1,6 @@
 # tPBM Circadian Analysis (Python)
 
-This package ports the MATLAB `Matlab Compact` workflows to Python. It
-supports spreadsheet-based KS/RTS smoother or forward-KF phase estimation,
+This package supports spreadsheet-based KS/RTS smoother or forward-KF phase estimation,
 phase particle filtering, core-body-temperature (CBT) state estimation, DLMO
 candidate detection and tracking, and plotting/exporting results.
 
@@ -12,7 +11,7 @@ candidate detection and tracking, and plotting/exporting results.
   subject, signal, phase estimator, and output folder.
 - `convert_garmin_data.py`: convert Labfront Garmin heart-rate and actigraphy
   exports into one-minute subject CSV files.
-- `plot_tpbm_results.py`: regenerate the three-panel SVG visualization from a
+- `plot_tpbm_results.py`: regenerate the three-panel visualization from a
   saved run folder.
 - `particle_filter.py`: particle filter; can also be run independently from a
   CSV of phase observations.
@@ -26,8 +25,8 @@ candidate detection and tracking, and plotting/exporting results.
   and optional target-day assignment.
 - `data_io.py`: XLSX, CSV, and MAT-file loading/conversion helpers.
 - `matlab_utils.py`: Python counterparts for MATLAB `Utils` calculations and
-  plotting. The pipeline writes its three-panel SVG directly; the legacy
-  MATLAB-style plotting helpers use Matplotlib.
+  plotting. Pipeline visualizations are saved as PNG; the legacy MATLAB-style
+  plotting helpers use Matplotlib.
 
 ## Requirements and setup
 
@@ -53,6 +52,9 @@ project folder, install the build dependencies and create the app package:
 & ".\build_windows.cmd" "E:\miniforge3\envs\tpbm-build\python.exe"
 ```
 
+The build script also bundles Pillow's native image libraries, which are
+required to save PNG visualizations in the packaged app.
+
 The executable and shareable ZIP are created in `dist`. Send
 `TpbmAnalysis-Windows.zip` to Windows users; extract the ZIP and run
 `TpbmAnalysis.exe` from the extracted `TpbmAnalysis` folder. Keep the other
@@ -74,11 +76,11 @@ In the window:
 
 1. Click **Browse...** to choose an `.xlsx` workbook or converted Garmin CSV,
    or click **Data folder...** to choose a Garmin participant or dataset folder.
-2. Confirm or edit the subject name (it is inferred from the selected file).
-3. Confirm the signal; the GUI defaults to `BPM` for workbooks and
-   `HeartRate` for Garmin CSV files. Garmin `ZeroCrossingCount` can also be
-   selected as the phase-estimation signal.
-4. Select the phase estimator (`KF` or `KS`).
+2. Set the subject label. For a selected participant folder, that label is used
+   for the analysis output. For a dataset folder containing multiple
+   participants, it prefixes each participant folder name in the outputs.
+3. Select **Heart beat per minute** or **Actigraphy**.
+4. Select the phase estimator (`KF` or `KS (too slow)`).
 5. Optionally choose a results folder, then click **Run analysis**.
 6. When it finishes, choose **Open latest results folder** to inspect outputs.
 
@@ -193,7 +195,9 @@ Each run creates a new timestamped directory under the output root:
   particle history.
 - `CBT/`: `Candidates.csv`, tracked `Events.csv`, `Daily.csv`, and
   `AllDays.csv`.
-- `Results_Visualization.svg`: phase, CBT state, and DLMO plot.
+- `DLMO_Summary.xlsx`: concise spreadsheet in the run folder's top level,
+  containing only `RecordingDay`, `DLMODateTime`, and `Status`.
+- `Results_Visualization.png`: phase, CBT state, and DLMO plot.
 - `Summary.json`: selected settings, elapsed stage timings, DLMO counts, and
   output location.
 
@@ -203,7 +207,7 @@ warmup, incomplete, ambiguous, missing, or tracked-event days. The detector
 also writes `Candidates.csv` and `Events.csv`, retaining candidate times,
 confidence and tracking status.
 
-The SVG has three panels:
+The visualization has three panels:
 
 1. PF output phase `theta_hat + delta_hat`, wrapped to `[0, 2*pi)` without
    subtracting the circadian trend.
@@ -219,11 +223,14 @@ No re-analysis is needed if the run folder has its saved PF and CBT files:
 "E:\miniforge3\envs\tpbm\python.exe" "E:\tPBM Python\plot_tpbm_results.py" "E:\tPBM Python\tPBM Results\<run-folder>"
 ```
 
-To choose another output filename or location:
+To choose another output filename or location and format:
 
 ```cmd
-"E:\miniforge3\envs\tpbm\python.exe" "E:\tPBM Python\plot_tpbm_results.py" "E:\tPBM Python\tPBM Results\<run-folder>" --output "C:\path\to\my_plot.svg"
+"E:\miniforge3\envs\tpbm\python.exe" "E:\tPBM Python\plot_tpbm_results.py" "E:\tPBM Python\tPBM Results\<run-folder>" --output "C:\path\to\my_plot.png"
 ```
+
+Regenerated visualizations are saved as PNG files; the output path must use
+the `.png` extension.
 
 ## Use case 4: Run the particle filter independently
 
@@ -341,11 +348,3 @@ Python docstrings or use `help(function)` in Python.
 - The particle-filter oscillator uses the MATLAB RK4 transition. The separate
   MATLAB `ode23` helper is represented with RK4 and interpolated light, so its
   results may differ slightly.
-
-## Tests
-
-Run all unit tests from the project folder:
-
-```cmd
-"E:\miniforge3\envs\tpbm\python.exe" -m unittest discover -v
-```

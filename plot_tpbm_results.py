@@ -1,4 +1,4 @@
-"""Regenerate the three-panel SVG visualization from a saved tPBM run folder."""
+"""Regenerate the three-panel PNG visualization from a saved tPBM run folder."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
-from run_tpbm import _save_results_visualization
+from run_tpbm import _save_results_visualization, _visualization_path
 
 
 def plot_saved_run(run_directory: Path, output_path: Path | None = None) -> Path:
-    """Load saved PF and DLMO artifacts and write the visualization SVG."""
+    """Load saved PF and DLMO artifacts and write the visualization PNG."""
     run_directory = run_directory.resolve()
     summary_path = run_directory / "Summary.json"
     diagnostics_path = run_directory / "PF" / "Diagnostics.csv"
@@ -70,7 +70,7 @@ def plot_saved_run(run_directory: Path, output_path: Path | None = None) -> Path
         "options": {"offset_hours": float(detector_options.get("offset_hours", 7.0))},
     }
     start_midnight = pd.Timestamp(summary["start_midnight"])
-    destination = output_path or run_directory / "Results_Visualization.svg"
+    destination = output_path or _visualization_path(run_directory)
     destination.parent.mkdir(parents=True, exist_ok=True)
     _save_results_visualization(destination, pf_result, dlmo, start_midnight)
     return destination.resolve()
@@ -86,7 +86,7 @@ def _main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        help="optional SVG output path (defaults to Results_Visualization.svg in the run folder)",
+        help="optional PNG output path (defaults to Results_Visualization.png in the run folder)",
     )
     arguments = parser.parse_args()
     output = plot_saved_run(arguments.run_directory, arguments.output)

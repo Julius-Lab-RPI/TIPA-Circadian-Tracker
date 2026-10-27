@@ -41,7 +41,12 @@ class GarminDataConversionTests(unittest.TestCase):
                 for subject, output in zip(subjects, generated, strict=True)
             ]
             run_results = [
-                {"summary": {"subject": subject.name, "output_dir": str(dataset / f"run-{subject.name}")}}
+                {
+                    "summary": {
+                        "subject": f"Experiment_{subject.name}",
+                        "output_dir": str(dataset / f"run-{subject.name}"),
+                    }
+                }
                 for subject in subjects
             ]
             progress_messages: list[str] = []
@@ -53,7 +58,8 @@ class GarminDataConversionTests(unittest.TestCase):
                 result = _run_dataset(
                     dataset,
                     dataset / "results",
-                    "ZeroCrossingCount",
+                    "Experiment",
+                    "Actigraphy",
                     "KF",
                     progress_messages.append,
                 )
@@ -62,7 +68,7 @@ class GarminDataConversionTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         self.assertEqual(
             [entry["subject"] for entry in result["completed"]],
-            ["subject-1", "subject-2"],
+            ["Experiment_subject-1", "Experiment_subject-2"],
         )
         self.assertEqual(result["failed"], [])
         self.assertEqual(result["skipped"], [])
@@ -70,6 +76,36 @@ class GarminDataConversionTests(unittest.TestCase):
         self.assertEqual(run.call_args_list[0].args[0].option, 2)
         self.assertEqual(run.call_args_list[0].args[0].signal_label, "ZeroCrossingCount")
         self.assertEqual(run.call_args_list[0].args[0].phase_estimator, "KF")
+        self.assertEqual(
+            [call.args[0].subject for call in run.call_args_list],
+            ["Experiment_subject-1", "Experiment_subject-2"],
+        )
+
+    def test_single_participant_uses_subject_field_as_label(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            participant = Path(directory) / "raw-participant-name"
+            (participant / "garmin-connect-daily-heart-rate").mkdir(parents=True)
+            (participant / "garmin-device-actigraphy").mkdir()
+            report = SimpleNamespace(
+                subject=participant.name,
+                output_path=participant / "Minute-by-minute.csv",
+            )
+            expected = {"summary": {"subject": "FriendlySubject"}}
+            with (
+                patch("run_tpbm_gui.convert_subject", return_value=report),
+                patch("run_tpbm_gui.run_pipeline", return_value=expected) as run,
+            ):
+                result = _run_dataset(
+                    participant,
+                    participant / "results",
+                    "FriendlySubject",
+                    "Heart beat per minute",
+                    "KF",
+                    lambda _message: None,
+                )
+
+        self.assertEqual(result["completed"], [expected["summary"]])
+        self.assertEqual(run.call_args.args[0].subject, "FriendlySubject")
 
     def test_folder_discovery_accepts_a_single_subject_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

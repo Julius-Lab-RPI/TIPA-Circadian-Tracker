@@ -2,13 +2,13 @@ import queue
 import tempfile
 import time
 import unittest
-import re
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+from PIL import Image
 
 from circadian_models import (
     activity_to_light,
@@ -31,7 +31,7 @@ from kalman_filter import (
     _evaluate_kf_population,
     simulate_kalman_filter,
 )
-from run_tpbm import _save_results_visualization
+from run_tpbm import _save_dlmo_summary, _save_results_visualization
 from run_tpbm_gui import TpbmLauncher
 
 
@@ -92,11 +92,65 @@ class TranslatedModuleTests(unittest.TestCase):
 
         self.assertEqual(launcher.input_path.value, str(path))
         self.assertEqual(launcher.subject.value, "subject-13")
-        self.assertEqual(launcher.signal.value, "HeartRate")
+        self.assertEqual(launcher.signal.value, "Heart beat per minute")
         self.assertEqual(
-            launcher.signal_values,
-            ("HeartRate", "ZeroCrossingCount"),
+            launcher.signal_values, ("Heart beat per minute", "Actigraphy")
         )
+
+    def test_gui_signal_labels_map_to_input_columns(self) -> None:
+        from run_tpbm_gui import _phase_estimator_code, _pipeline_signal
+
+        self.assertEqual(_pipeline_signal("Heart beat per minute", ".xlsx"), "BPM")
+        self.assertEqual(_pipeline_signal("Heart beat per minute", ".csv"), "HeartRate")
+        self.assertEqual(_pipeline_signal("Actigraphy", ".xlsx"), "Act")
+        self.assertEqual(
+            _pipeline_signal("Actigraphy", ".csv"), "ZeroCrossingCount"
+        )
+        self.assertEqual(_phase_estimator_code("KS (too slow)"), "KS")
+
+    def test_results_visualization_saves_png_only(self) -> None:
+        time_hours = np.arange(0, 72, 1 / 60)
+        pf_result = SimpleNamespace(
+            time_hours=time_hours,
+            mean_state_theta_rad=np.mod(time_hours * np.pi / 12, 2 * np.pi),
+            state_mean=np.column_stack(
+                (
+                    np.sin(time_hours * np.pi / 12),
+                    np.cos(time_hours * np.pi / 12),
+                )
+            ),
+        )
+        start = pd.Timestamp("2025-01-01")
+        dlmo = {
+            "options": {"offset_hours": 7.0},
+            "candidates": pd.DataFrame({"CBTHour": [30.0, 54.0]}),
+            "events": pd.DataFrame(
+                {
+                    "DLMODateTime": [
+                        start + pd.Timedelta(hours=21.75),
+                        start + pd.Timedelta(hours=45.75),
+                    ],
+                    "DLMOHour": [21.75, 21.75],
+                    "Ambiguous": [False, True],
+                    "EventID": [1, 2],
+                    "Status": ["tracked", "ambiguous"],
+                }
+            ),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "chart.png"
+            _save_results_visualization(output, pf_result, dlmo, start)
+            with Image.open(output) as image:
+                self.assertEqual(image.format, "PNG")
+                self.assertEqual(image.size, (1600, 1230))
+                colors = {color for _, color in image.getcolors(1600 * 1230)}
+                self.assertIn((37, 131, 74, 255), colors)
+                self.assertIn((224, 139, 0, 255), colors)
+
+            with self.assertRaisesRegex(ValueError, r"\.png extension"):
+                _save_results_visualization(
+                    Path(directory) / "chart.svg", pf_result, dlmo, start
+                )
 
     def test_state_space_and_rts_smoother_shapes(self) -> None:
         a, b, c, d = create_kalman_state_space(1, 3, 1 / 60)
@@ -189,7 +243,7 @@ class TranslatedModuleTests(unittest.TestCase):
 
     def test_results_visualization_contains_all_three_panels_and_dlmo_types(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "results.svg"
+            output = Path(directory) / "results.png"
             start = pd.Timestamp("2025-04-21")
             pf_result = SimpleNamespace(
                 time_hours=np.arange(0, 96, 1 / 60),
@@ -221,21 +275,46 @@ class TranslatedModuleTests(unittest.TestCase):
                 ),
             }
             _save_results_visualization(output, pf_result, dlmo, start)
-            svg = output.read_text(encoding="utf-8")
-        self.assertEqual(svg.count("<polyline"), 2)
-        self.assertIn("candidate troughs and tracked events", svg)
-        self.assertIn("E1 anchor", svg)
-        self.assertIn("E2 confirmed ambiguous", svg)
-        self.assertIn("#25834a", svg)
-        self.assertIn("#e08b00", svg)
-        phase_line = re.search(
-            r'<polyline class="line" data-series="wrapped_theta_hat_plus_delta_hat" points="([^"]+)"',
-            svg,
+            with Image.open(output) as image:
+                self.assertEqual(image.format, "PNG")
+                self.assertEqual(image.size, (1600, 1230))
+                colors = {color for _, color in image.getcolors(1600 * 1230)}
+        self.assertIn((37, 131, 74, 255), colors)
+        self.assertIn((224, 139, 0, 255), colors)
+        self.assertIn((119, 119, 119, 255), colors)
+
+    def test_root_dlmo_summary_contains_only_requested_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            targets = pd.DataFrame(
+                {
+                    "RecordingDay": [1, 2],
+                    "DLMODateTime": [
+                        pd.Timestamp("2025-01-01 21:00"),
+                        pd.NaT,
+                    ],
+                    "Status": ["anchor", "incomplete_end"],
+                    "EveningDate": pd.to_datetime(
+                        ["2025-01-01", "2025-01-02"]
+                    ),
+                    "DLMOHour": [21.0, np.nan],
+                }
+            )
+
+            path = _save_dlmo_summary(output_dir, targets)
+            saved = pd.read_excel(path)
+
+        self.assertEqual(path, output_dir / "DLMO_Summary.xlsx")
+        self.assertEqual(
+            list(saved.columns), ["RecordingDay", "DLMODateTime", "Status"]
         )
-        self.assertIsNotNone(phase_line)
-        first_point = phase_line.group(1).split()[0]
-        _, first_y = (float(value) for value in first_point.split(","))
-        self.assertAlmostEqual(first_y, 235.0)
+        self.assertEqual(saved["RecordingDay"].tolist(), [1, 2])
+        self.assertEqual(saved["Status"].tolist(), ["anchor", "incomplete_end"])
+        self.assertEqual(
+            pd.Timestamp(saved.loc[0, "DLMODateTime"]),
+            pd.Timestamp("2025-01-01 21:00"),
+        )
+        self.assertTrue(pd.isna(saved.loc[1, "DLMODateTime"]))
 
     def test_available_phase_shift_supports_short_and_variable_recordings(self) -> None:
         omega = 2 * np.pi / 24

@@ -17,6 +17,25 @@ from typing import Any
 from convert_garmin_data import convert_subject
 from run_tpbm import PipelineConfig, run_pipeline
 
+_SIGNAL_CHOICES = ("Heart beat per minute", "Actigraphy")
+
+
+def _pipeline_signal(display_signal: str, source_suffix: str) -> str:
+    if display_signal not in _SIGNAL_CHOICES:
+        raise ValueError(f"unsupported signal selection: {display_signal}")
+    is_csv = source_suffix.lower() == ".csv"
+    if display_signal == "Heart beat per minute":
+        return "HeartRate" if is_csv else "BPM"
+    return "ZeroCrossingCount" if is_csv else "Act"
+
+
+def _phase_estimator_code(display_choice: str) -> str:
+    if display_choice == "KF":
+        return "KF"
+    if display_choice == "KS (too slow)":
+        return "KS"
+    raise ValueError(f"unsupported phase estimator selection: {display_choice}")
+
 
 def _format_elapsed(seconds: float) -> str:
     total_seconds = max(0, int(seconds))
@@ -49,6 +68,7 @@ def _subject_directories(dataset_root: Path) -> list[Path]:
 def _run_dataset(
     dataset_root: Path,
     output_root: Path,
+    subject_label: str,
     signal: str,
     phase_estimator: str,
     progress: Callable[[str], None],
@@ -64,21 +84,26 @@ def _run_dataset(
     skipped: list[str] = []
     failed: list[str] = []
     for index, subject_directory in enumerate(subjects, start=1):
-        subject = subject_directory.name
+        subject = (
+            subject_label
+            if len(subjects) == 1
+            else f"{subject_label}_{subject_directory.name}"
+        )
         progress(f"Converting and analyzing {subject} ({index}/{len(subjects)})...")
         try:
             report = convert_subject(subject_directory)
             if report.output_path is None:
                 skipped.append(subject)
                 continue
-            option = 2 if signal == "ZeroCrossingCount" else 3
+            signal_label = _pipeline_signal(signal, ".csv")
+            option = 2 if signal == "Actigraphy" else 3
             result = run_pipeline(
                 PipelineConfig(
                     subject=subject,
                     input_xlsx=report.output_path,
                     output_root=output_root,
                     option=option,
-                    signal_label=signal,
+                    signal_label=signal_label,
                     phase_estimator=phase_estimator,
                 )
             )
@@ -101,8 +126,8 @@ class TpbmLauncher:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("tPBM Analysis")
-        self.root.geometry("900x430")
-        self.root.minsize(800, 400)
+        self.root.geometry("900x470")
+        self.root.minsize(800, 440)
         self.messages: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.started_at: float | None = None
         self.result_directory: Path | None = None
@@ -110,7 +135,7 @@ class TpbmLauncher:
         self.input_path = tk.StringVar()
         self.output_root = tk.StringVar(value=str(_default_output_root()))
         self.subject = tk.StringVar(value="4_5")
-        self.signal = tk.StringVar(value="BPM")
+        self.signal = tk.StringVar(value="Heart beat per minute")
         self.phase_estimator = tk.StringVar(value="KF")
         self.status = tk.StringVar(
             value="Choose a workbook, Garmin CSV, or Garmin data folder to begin."
@@ -166,9 +191,9 @@ class TpbmLauncher:
         self.signal_box = ttk.Combobox(
             frame,
             textvariable=self.signal,
-            values=("BPM", "Act"),
+            values=_SIGNAL_CHOICES,
             state="readonly",
-            width=14,
+            width=24,
         )
         self.signal_box.grid(row=4, column=1, sticky="w", padx=8, pady=5)
 
@@ -178,14 +203,14 @@ class TpbmLauncher:
         self.estimator_box = ttk.Combobox(
             frame,
             textvariable=self.phase_estimator,
-            values=("KF", "KS"),
+            values=("KF", "KS (too slow)"),
             state="readonly",
             width=14,
         )
         self.estimator_box.grid(row=5, column=1, sticky="w", padx=8, pady=5)
         ttk.Label(
             frame,
-            text="KF = forward filter; KS = RTS smoother.",
+            text="KF = forward filter; KS = RTS smoother (too slow).",
         ).grid(row=5, column=2, columnspan=2, sticky="w", padx=8)
 
         ttk.Label(frame, text="Results folder").grid(
@@ -245,33 +270,38 @@ class TpbmLauncher:
             initialdir=str(initial_directory),
         )
         if selected:
+            selected_path = Path(selected)
             self.input_path.set(selected)
-            self.signal_box.configure(
-                values=("HeartRate", "ZeroCrossingCount")
-            )
-            self.signal.set("HeartRate")
-            self.subject.set("Folder mode")
+            self.signal_box.configure(values=_SIGNAL_CHOICES)
+            self.signal.set("Heart beat per minute")
+            self.subject.set(selected_path.name)
             self.status.set(
                 "Folder selected. The app will create Minute-by-minute.csv "
-                "and analyze each participant with usable data."
+                "and analyze each participant with usable data. "
+                "For a multi-participant folder, the Subject value will prefix "
+                "each participant folder name. Choose Heart beat per minute "
+                "or Actigraphy."
             )
 
     def _configure_selected_input(self, path: Path) -> None:
         self.input_path.set(str(path))
+        self.signal_box.configure(values=_SIGNAL_CHOICES)
         if path.suffix.lower() == ".csv":
             self.subject.set(path.parent.name)
-            self.signal_box.configure(values=("HeartRate", "ZeroCrossingCount"))
-            self.signal.set("HeartRate")
-            self.status.set("Garmin CSV selected. HeartRate will be analyzed by default.")
+            self.signal.set("Heart beat per minute")
+            self.status.set(
+                "Garmin CSV selected. Heart beat per minute will be analyzed by default."
+            )
             return
 
-        self.signal_box.configure(values=("BPM", "Act"))
-        self.signal.set("BPM")
+        self.signal.set("Heart beat per minute")
         subject_match = re.match(r"(.+)_minute-by-minute-data$", path.stem)
         self.subject.set(
             subject_match.group(1) if subject_match else path.parent.name
         )
-        self.status.set("Workbook selected. BPM will be analyzed by default.")
+        self.status.set(
+            "Workbook selected. Heart beat per minute will be analyzed by default."
+        )
 
     def _browse_output(self) -> None:
         selected = filedialog.askdirectory(
@@ -305,9 +335,7 @@ class TpbmLauncher:
             )
             return
         subject = self.subject.get().strip()
-        if not is_dataset and (
-            not subject or re.search(r'[<>:"/\\|?*\x00-\x1f]', subject)
-        ):
+        if not subject or re.search(r'[<>:"/\\|?*\x00-\x1f]', subject):
             messagebox.showerror(
                 "Check subject name",
                 "Enter a subject name without filename-invalid characters.",
@@ -329,9 +357,9 @@ class TpbmLauncher:
             subject=subject,
             input_xlsx=source,
             output_root=output,
-            option=2 if self.signal.get() in ("Act", "ZeroCrossingCount") else 3,
-            signal_label=self.signal.get(),
-            phase_estimator=self.phase_estimator.get(),
+            option=2 if self.signal.get() == "Actigraphy" else 3,
+            signal_label=_pipeline_signal(self.signal.get(), source.suffix),
+            phase_estimator=_phase_estimator_code(self.phase_estimator.get()),
         )
         self._set_running(True)
         self.started_at = time.perf_counter()
@@ -340,7 +368,13 @@ class TpbmLauncher:
         if is_dataset:
             worker = threading.Thread(
                 target=self._run_dataset_worker,
-                args=(source, output, self.signal.get(), self.phase_estimator.get()),
+                args=(
+                    source,
+                    output,
+                    subject,
+                    self.signal.get(),
+                    _phase_estimator_code(self.phase_estimator.get()),
+                ),
                 daemon=True,
             )
         else:
@@ -362,6 +396,7 @@ class TpbmLauncher:
         self,
         dataset_root: Path,
         output_root: Path,
+        subject_label: str,
         signal: str,
         phase_estimator: str,
     ) -> None:
@@ -369,6 +404,7 @@ class TpbmLauncher:
             result = _run_dataset(
                 dataset_root,
                 output_root,
+                subject_label,
                 signal,
                 phase_estimator,
                 lambda message: self.messages.put(("progress", message)),

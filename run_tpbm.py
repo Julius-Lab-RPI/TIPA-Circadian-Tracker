@@ -5,14 +5,17 @@ from __future__ import annotations
 import argparse
 from html import escape
 import json
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
 
 import numpy as np
 import pandas as pd
+from PIL import Image, ImageDraw, ImageFont
 from scipy.io import savemat
 
 from circadian_models import activity_to_light, estimate_available_phase_shift
@@ -283,7 +286,9 @@ def _save_results_visualization(
     dlmo: dict[str, Any],
     start_midnight: pd.Timestamp,
 ) -> None:
-    """Save un-detrended PF output phase, CBT state, and DLMO events as SVG."""
+    """Save the three-panel visualization as a PNG image."""
+    if output_path.suffix.lower() != ".png":
+        raise ValueError("visualization output must use the .png extension")
     time_hours = pf_result.time_hours
     phase = np.mod(pf_result.mean_state_theta_rad, 2 * np.pi)
     cbt_state = pf_result.state_mean[:, 0]
@@ -469,7 +474,163 @@ def _save_results_visualization(
     add_text(left, 1150, "x = candidate DLMO; green circle = tracked event; orange diamond = ambiguous tracked event; labels show event status", size=13, anchor="start")
     add_text(800, 1200, "Date", size=15)
     fragments.append("</svg>")
-    output_path.write_text("\n".join(fragments), encoding="utf-8")
+    _save_svg_raster("\n".join(fragments), output_path)
+
+
+def _save_svg_raster(svg_content: str, output_path: Path) -> None:
+    """Rasterize this renderer's SVG primitives using Pillow."""
+    root = ElementTree.fromstring(svg_content)
+    width = int(root.attrib["width"])
+    height = int(root.attrib["height"])
+    image = Image.new("RGBA", (width, height), "white")
+    draw = ImageDraw.Draw(image, "RGBA")
+    css = {
+        "grid": {"stroke": "#ddd", "stroke-width": "1"},
+        "axis": {"stroke": "#444", "stroke-width": "1.4"},
+        "line": {"stroke-width": "1.5"},
+    }
+    number_pattern = re.compile(r"[MLZ]|[-+]?(?:\d*\.)?\d+")
+
+    def rgba(color: str, alpha: int = 255) -> tuple[int, int, int, int] | None:
+        if color in {"none", "transparent"}:
+            return None
+        if color.startswith("#") and len(color) == 7:
+            return (
+                int(color[1:3], 16),
+                int(color[3:5], 16),
+                int(color[5:7], 16),
+                alpha,
+            )
+        if color == "white":
+            return (255, 255, 255, alpha)
+        if color == "#222":
+            return (34, 34, 34, alpha)
+        if color == "#ddd":
+            return (221, 221, 221, alpha)
+        if color == "#444":
+            return (68, 68, 68, alpha)
+        if color == "#777":
+            return (119, 119, 119, alpha)
+        raise ValueError(f"unsupported SVG color in visualization: {color}")
+
+    def style_for(element: ElementTree.Element) -> dict[str, str]:
+        style = css.get(element.attrib.get("class", ""), {}).copy()
+        style.update(element.attrib)
+        return style
+
+    def font_for(style: dict[str, str]) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+        size = int(float(style.get("font-size", "15")))
+        bold = style.get("font-weight") == "bold"
+        font_name = "arialbd.ttf" if bold else "arial.ttf"
+        try:
+            return ImageFont.truetype(font_name, size)
+        except OSError:
+            return ImageFont.load_default(size=size)
+
+    for element in root:
+        tag = element.tag.rsplit("}", 1)[-1]
+        style = style_for(element)
+        stroke = rgba(style.get("stroke", "none"))
+        fill = rgba(style.get("fill", "none"))
+        stroke_width = max(1, int(float(style.get("stroke-width", "1"))))
+        opacity = float(style.get("opacity", "1"))
+        if stroke is not None and opacity < 1:
+            stroke = (*stroke[:3], round(stroke[3] * opacity))
+
+        if tag == "rect":
+            draw.rectangle(
+                (0, 0, width, height),
+                fill=fill or (255, 255, 255, 255),
+            )
+        elif tag == "line":
+            draw.line(
+                (
+                    float(style["x1"]),
+                    float(style["y1"]),
+                    float(style["x2"]),
+                    float(style["y2"]),
+                ),
+                fill=stroke,
+                width=stroke_width,
+            )
+        elif tag == "polyline":
+            points = [
+                tuple(float(value) for value in point.split(","))
+                for point in style["points"].split()
+            ]
+            if len(points) > 1:
+                draw.line(points, fill=stroke, width=stroke_width)
+        elif tag == "circle":
+            cx, cy, radius = (
+                float(style[key]) for key in ("cx", "cy", "r")
+            )
+            bounds = (cx - radius, cy - radius, cx + radius, cy + radius)
+            draw.ellipse(bounds, fill=fill, outline=stroke, width=stroke_width)
+        elif tag == "path":
+            tokens = number_pattern.findall(style.get("d", ""))
+            subpath: list[tuple[float, float]] = []
+            subpaths: list[tuple[list[tuple[float, float]], bool]] = []
+            index = 0
+            closed = False
+            while index < len(tokens):
+                command = tokens[index]
+                index += 1
+                if command == "M":
+                    if subpath:
+                        subpaths.append((subpath, closed))
+                    subpath = [
+                        (float(tokens[index]), float(tokens[index + 1]))
+                    ]
+                    closed = False
+                    index += 2
+                elif command == "L":
+                    subpath.append((float(tokens[index]), float(tokens[index + 1])))
+                    index += 2
+                elif command == "Z":
+                    closed = True
+                    if subpath:
+                        subpaths.append((subpath, closed))
+                    subpath = []
+                    closed = False
+                else:
+                    raise ValueError(f"unsupported SVG path command: {command}")
+            if subpath:
+                subpaths.append((subpath, closed))
+            for points, is_closed in subpaths:
+                if is_closed and fill is not None:
+                    draw.polygon(points, fill=fill)
+                if stroke is not None and len(points) > 1:
+                    draw.line(
+                        points + ([points[0]] if is_closed else []),
+                        fill=stroke,
+                        width=stroke_width,
+                    )
+        elif tag == "text":
+            text_anchor = style.get("text-anchor", "middle")
+            anchor = {"start": "ls", "middle": "ms", "end": "rs"}[text_anchor]
+            draw.text(
+                (float(style["x"]), float(style["y"])),
+                element.text or "",
+                font=font_for(style),
+                fill=fill or (34, 34, 34, 255),
+                anchor=anchor,
+            )
+
+    image.save(output_path, format="PNG")
+
+
+def _visualization_path(output_dir: Path) -> Path:
+    return output_dir / "Results_Visualization.png"
+
+
+def _save_dlmo_summary(output_dir: Path, targets: pd.DataFrame) -> Path:
+    """Write a concise DLMO spreadsheet beside the run's result subfolders."""
+    summary_path = output_dir / "DLMO_Summary.xlsx"
+    targets[["RecordingDay", "DLMODateTime", "Status"]].to_excel(
+        summary_path,
+        index=False,
+    )
+    return summary_path
 
 
 def run_pipeline(config: PipelineConfig) -> dict[str, object]:
@@ -583,7 +744,8 @@ def run_pipeline(config: PipelineConfig) -> dict[str, object]:
     dlmo["candidates"].to_csv(output_dir / "CBT" / "Candidates.csv", index=False)
     dlmo["daily"].to_csv(output_dir / "CBT" / "Daily.csv", index=False)
     targets.to_csv(output_dir / "CBT" / "AllDays.csv", index=False)
-    visualization_path = output_dir / "Results_Visualization.svg"
+    _save_dlmo_summary(output_dir, targets)
+    visualization_path = _visualization_path(output_dir)
     _save_results_visualization(
         visualization_path, pf_result, dlmo, data.start_midnight
     )

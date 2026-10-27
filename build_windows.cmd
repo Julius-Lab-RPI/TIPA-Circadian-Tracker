@@ -13,6 +13,15 @@ if not exist "%PYTHON_EXE%" (
 )
 for %%I in ("%PYTHON_EXE%") do set "PYTHON_DIR=%%~dpI"
 set "PATH=%PYTHON_DIR%Library\bin;%PATH%"
+set "PIL_DLL_DIR=%PYTHON_DIR%Library\bin"
+
+for %%D in (tiff.dll jpeg8.dll openjp2.dll zlib-ng2.dll deflate.dll Lerc.dll zstd.dll) do (
+    if not exist "%PIL_DLL_DIR%\%%D" (
+        echo Required Pillow runtime library not found: %PIL_DLL_DIR%\%%D
+        echo Build with an environment that contains Pillow's native libraries.
+        exit /b 1
+    )
+)
 
 pushd "%~dp0"
 "%PYTHON_EXE%" -c "import PyInstaller" >nul 2>&1
@@ -34,7 +43,7 @@ if exist "dist\TpbmAnalysis-Windows.zip" (
     del /q "dist\TpbmAnalysis-Windows.zip"
 )
 
-"%PYTHON_EXE%" -m PyInstaller --noconfirm --clean --windowed --onedir --name TpbmAnalysis --collect-all openpyxl run_tpbm_gui.py
+"%PYTHON_EXE%" -m PyInstaller --noconfirm --clean --windowed --onedir --name TpbmAnalysis --collect-all openpyxl --add-binary "%PIL_DLL_DIR%\tiff.dll;." --add-binary "%PIL_DLL_DIR%\jpeg8.dll;." --add-binary "%PIL_DLL_DIR%\openjp2.dll;." --add-binary "%PIL_DLL_DIR%\zlib-ng2.dll;." --add-binary "%PIL_DLL_DIR%\deflate.dll;." --add-binary "%PIL_DLL_DIR%\Lerc.dll;." --add-binary "%PIL_DLL_DIR%\zstd.dll;." run_tpbm_gui.py
 if errorlevel 1 (
     popd
     exit /b 1
